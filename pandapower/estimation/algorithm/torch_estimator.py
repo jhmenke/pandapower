@@ -43,27 +43,23 @@ class TorchEstimator(torch.nn.Module):
         super(TorchEstimator, self).__init__()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            Ybus, Yf, Yt = makeYbus(eppci["baseMVA"], eppci["bus"], eppci["branch"])
-            eppci['internal']['Yf'], eppci['internal']['Yt'], \
-            eppci['internal']['Ybus'] = Yf, Yt, Ybus
-
-        Ybus, Yf, Yt = Ybus.toarray(), Yf.toarray(), Yt.toarray()
-        self.yfr = torch.from_numpy(np.real(Yf).astype(np.double))
-        self.yfi = torch.from_numpy(np.imag(Yf).astype(np.double))
-        self.ytr = torch.from_numpy(np.real(Yt).astype(np.double))
-        self.yti = torch.from_numpy(np.imag(Yt).astype(np.double))
-        self.ybr = torch.from_numpy(np.real(Ybus).astype(np.double))
-        self.ybi = torch.from_numpy(np.imag(Ybus).astype(np.double))
-
+            ybus, yf, yt = makeYbus(eppci["baseMVA"], eppci["bus"], eppci["branch"])
+            eppci['internal']['Yf'], eppci['internal']['Yt'], eppci['internal']['Ybus'] = yf, yt, ybus
+        ybus, yf, yt = ybus.toarray(), yf.toarray(), yt.toarray()
+        self.yfr = torch.from_numpy(np.real(yf).astype(np.double))
+        self.yfi = torch.from_numpy(np.imag(yf).astype(np.double))
+        self.ytr = torch.from_numpy(np.real(yt).astype(np.double))
+        self.yti = torch.from_numpy(np.imag(yt).astype(np.double))
+        self.ybr = torch.from_numpy(np.real(ybus).astype(np.double))
+        self.ybi = torch.from_numpy(np.imag(ybus).astype(np.double))
         self.slack_bus = np.argwhere(eppci["bus"][:, BUS_TYPE] == 3).ravel()
         self.non_slack_bus = np.argwhere(eppci["bus"][:, BUS_TYPE] != 3).ravel()
         self.fbus = torch.from_numpy(np.abs(eppci["branch"][:, F_BUS])).long()
         self.tbus = torch.from_numpy(np.abs(eppci["branch"][:, T_BUS])).long()
-
         # ignore current measurement
         non_nan_meas_mask = eppci.non_nan_meas_mask[:3 * len(eppci["bus"]) + 4 * len(eppci["branch"])]
-        self.non_nan_meas_mask = t(non_nan_meas_mask).bool().view(-1, 1)
-        self.vi_slack = torch.zeros(self.slack_bus.shape[0], 1, requires_grad=False, dtype=td)
+        self.non_nan_meas_mask = t(non_nan_meas_mask).bool()
+        self.vi_slack = t(eppci.V[self.slack_bus].imag, requires_grad=False, dtype=td)
         self.vi_mapping = torch.from_numpy(np.argsort(np.r_[self.slack_bus, self.non_slack_bus])).long()
 
     def forward(self, vr, vi_non_slack):
@@ -95,12 +91,12 @@ class TorchEstimator(torch.nn.Module):
 
 @torch.jit.script
 def weighted_mse_loss(predicted, target, weight):
-    return torch.sum(((predicted - target) / weight)**2)
+    return torch.sum(((target - predicted) / weight)**2)
 
 
 def optimize(model, floss, vr, vi_non_slack, optimizer="lbfgs"):
     if optimizer == "lbfgs":
-        optimizer = torch.optim.LBFGS([vr, vi_non_slack], lr=1.0, max_iter=100)
+        optimizer = torch.optim.LBFGS([vr, vi_non_slack], lr=1.0, max_iter=1000)
         max_epochs = 1
     else:
         optimizer = torch.optim.Adam([vr, vi_non_slack], lr=1.0)
@@ -128,14 +124,11 @@ class TorchAlgorithm(WLSAlgorithm):
         self.initialize(eppci)
         model = TorchEstimator(eppci)
         floss = partial(weighted_mse_loss, target=t(eppci.z).double(), weight=t(eppci.r_cov).double())
-        phi = eppci.E[:len(eppci.non_slack_buses), np.newaxis]
-        r = eppci.E[len(eppci.non_slack_buses):][:, np.newaxis].copy()
-        vi_non_slack = t((r[eppci.non_slack_buses] * np.sin(phi)), dtype=td, requires_grad=True)
-        r[eppci.non_slack_buses] *= np.cos(phi)
-        vr = t(r, dtype=td, requires_grad=True)
+        vr = t(eppci.V.real, dtype=td, requires_grad=True)
+        vi = eppci.V.imag.copy()
+        vi_non_slack = t(eppci.V.imag[eppci.non_slack_buses], dtype=td, requires_grad=True)
         vr, vi_non_slack, self.successful = optimize(model, floss, vr, vi_non_slack)
         vr = vr.detach().numpy().ravel()
-        vi = np.zeros(len(eppci["bus"]))
         vi[eppci.non_slack_buses] = vi_non_slack.detach().numpy().ravel()
-        eppci.update_E(np.concatenate((np.arctan2(vi, vr)[model.non_slack_bus], np.sqrt(vr**2 + vi**2))))
+        eppci.update_E(np.concatenate((np.arctan2(vi, vr)[eppci.non_slack_buses], np.sqrt(vr**2 + vi**2))))
         return eppci
