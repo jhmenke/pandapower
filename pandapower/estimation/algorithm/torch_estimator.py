@@ -128,14 +128,14 @@ class TorchAlgorithm(WLSAlgorithm):
         self.initialize(eppci)
         model = TorchEstimator(eppci)
         floss = partial(weighted_mse_loss, target=t(eppci.z).double(), weight=t(eppci.r_cov).double())
-        vr = t(eppci.E[len(eppci.non_slack_buses):][:, np.newaxis], dtype=td, requires_grad=True)
-        # vi_non_slack = (torch.tan(t(eppci.E[:len(eppci.non_slack_buses), np.newaxis])) * vr[eppci.non_slack_buses, :]).clone().detach().double().requires_grad_(True)
-        vi_non_slack = t(np.tan(eppci.E[:len(eppci.non_slack_buses), np.newaxis])
-                         * eppci.E[len(eppci.non_slack_buses) + eppci.non_slack_buses][:, np.newaxis], dtype=td, requires_grad=True)
+        phi = eppci.E[:len(eppci.non_slack_buses), np.newaxis]
+        r = eppci.E[len(eppci.non_slack_buses):][:, np.newaxis].copy()
+        vi_non_slack = t((r[eppci.non_slack_buses] * np.sin(phi)), dtype=td, requires_grad=True)
+        r[eppci.non_slack_buses] *= np.cos(phi)
+        vr = t(r, dtype=td, requires_grad=True)
         vr, vi_non_slack, self.successful = optimize(model, floss, vr, vi_non_slack)
         vr = vr.detach().numpy().ravel()
         vi = np.zeros(len(eppci["bus"]))
-        vi[model.non_slack_bus] = vi_non_slack.detach().numpy().ravel()
-        eppci.update_E(np.concatenate((np.arctan(vi / vr)[model.non_slack_bus], np.sqrt(vr**2 + vi**2))))
+        vi[eppci.non_slack_buses] = vi_non_slack.detach().numpy().ravel()
+        eppci.update_E(np.concatenate((np.arctan2(vi, vr)[model.non_slack_bus], np.sqrt(vr**2 + vi**2))))
         return eppci
-
